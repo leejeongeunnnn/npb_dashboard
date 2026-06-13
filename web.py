@@ -4,6 +4,11 @@ from bs4 import BeautifulSoup
 import datetime
 import textwrap
 import pandas as pd
+import folium
+from streamlit_folium import st_folium
+from geopy.distance import geodesic
+import stadium_layouts
+import plotly.graph_objects as go
 
 # 웹사이트 기본 설정
 st.set_page_config(page_title="일본 프로야구 대시보드", page_icon="⚾", layout="wide")
@@ -43,6 +48,19 @@ TEAM_INFO = {
     "西武": {"kr": "세이부 라이온즈", "color": "#2563EB"},
     "日本ハム": {"kr": "니혼햄 파이터즈", "color": "#06B6D4"}
 }
+
+# 선수 이름 일본어 -> 한국어 매핑 사전 (공백 제거 후 매핑)
+import player_translations
+PLAYER_NAME_TRANSLATION = player_translations.PLAYER_NAME_TRANSLATION
+
+
+def translate_player_name(jp_name):
+    """일본어 선수 이름을 한국어 번역으로 매핑. 매핑되지 않은 경우 원래 이름 반환."""
+    if not jp_name:
+        return jp_name
+    # 공백 제거 및 특수 기호 정규화
+    clean = jp_name.replace(" ", "").replace("\u3000", "").replace("\xa0", "")
+    return PLAYER_NAME_TRANSLATION.get(clean, jp_name)
 
 # 각 팀의 홈구장 및 공식 사이트 정보 (위경도 포함)
 TEAM_STADIUM_INFO = {
@@ -865,8 +883,105 @@ with tab1:
     else:
         st.warning("등록되지 않은 팀명입니다. 정확한 이름으로 입력해 주세요.")
 
+# --- 크롤링 함수 (NPB 규정타석 타자 스크래핑) ---
+def fetch_qualified_batters():
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    }
+    batters = {}
+    
+    # 12개 구단 축약어 -> 한국어 매핑 및 공식 구단 컬러 설정
+    team_abbrev_map = {
+        "神": {"kr": "한신 타이거스", "team_jp": "阪神", "color": "#EAB308"},
+        "広": {"kr": "히로시마 도요 카프", "team_jp": "広島", "color": "#EF4444"},
+        "デ": {"kr": "요코하마 DeNA 베이스타스", "team_jp": "DeNA", "color": "#2563EB"},
+        "巨": {"kr": "요미우리 자이언츠", "team_jp": "巨人", "color": "#F97316"},
+        "ヤ": {"kr": "야쿠르트 스왈로스", "team_jp": "ヤクルト", "color": "#475569"},
+        "中": {"kr": "주니치 드래곤즈", "team_jp": "中日", "color": "#3B82F6"},
+        "ソ": {"kr": "소프트뱅크 호크스", "team_jp": "ソフトバンク", "color": "#FBBF24"},
+        "日": {"kr": "니혼햄 파이터즈", "team_jp": "日本ハム", "color": "#06B6D4"},
+        "ロ": {"kr": "지바 롯데 마린스", "team_jp": "ロッテ", "color": "#94A3B8"},
+        "楽": {"kr": "라쿠텐 골든이글스", "team_jp": "楽天", "color": "#991B1B"},
+        "西": {"kr": "세이부 라이온즈", "team_jp": "西武", "color": "#2563EB"},
+        "オ": {"kr": "오릭스 버팔로즈", "team_jp": "オリックス", "color": "#1E293B"}
+    }
+    
+    urls = [
+        "https://npb.jp/bis/2026/stats/bat_c.html",
+        "https://npb.jp/bis/2026/stats/bat_p.html"
+    ]
+    
+    for url in urls:
+        try:
+            res = requests.get(url, headers=headers)
+            if res.status_code != 200:
+                continue
+            html = res.content.decode('utf-8', errors='ignore')
+            soup = BeautifulSoup(html, 'html.parser')
+            table = soup.find('table')
+            if not table:
+                continue
+            rows = table.find_all('tr')
+            for r in rows[1:]:
+                cells = [c.text.strip().replace('\n', '').replace('\r', '').replace('\u3000', ' ') for c in r.find_all(['td', 'th'])]
+                if len(cells) >= 24:
+                    full_name_raw = cells[1] # 예: "佐藤 輝明(神)"
+                    if '(' in full_name_raw and ')' in full_name_raw:
+                        name, abbrev = full_name_raw.split('(')
+                        abbrev = abbrev.replace(')', '')
+                        name = name.strip()
+                    else:
+                        name = full_name_raw.strip()
+                        abbrev = ""
+                        
+                    team_info = team_abbrev_map.get(abbrev, {"kr": "기타", "team_jp": abbrev, "color": "#9ca3af"})
+                    
+                    try:
+                        avg = float(cells[2]) if cells[2] != '.' else 0.0
+                    except ValueError:
+                        avg = 0.0
+                        
+                    try:
+                        hr = int(cells[10])
+                    except ValueError:
+                        hr = 0
+                        
+                    try:
+                        sb = int(cells[13])
+                    except ValueError:
+                        sb = 0
+                        
+                    try:
+                        slg = float(cells[22]) if cells[22] != '.' else 0.0
+                    except ValueError:
+                        slg = 0.0
+                        
+                    try:
+                        obp = float(cells[23]) if cells[23] != '.' else 0.0
+                    except ValueError:
+                        obp = 0.0
+                    
+                    name_kr = translate_player_name(name)
+                    key = f"{name_kr} ({name} / {team_info['kr']})"
+                    batters[key] = {
+                        "name": name_kr,
+                        "타율": avg,
+                        "홈런": hr,
+                        "출루율": obp,
+                        "장타율": slg,
+                        "도루": sb,
+                        "team": team_info["kr"],
+                        "team_jp": team_info["team_jp"],
+                        "color": team_info["color"]
+                    }
+        except Exception as e:
+            print(f"[ERROR] Scrape NPB leaders failed: {e}")
+            
+    return batters
+
 # --- 크롤링 함수 (날짜별 스케줄 및 결과 조회) ---
 def fetch_games_by_date(date_str):
+
     url = "https://baseball.yahoo.co.jp/npb/schedule/"
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
@@ -983,7 +1098,7 @@ def fetch_game_player_stats(stats_url, target_team_jp):
                     
                     batters.append({
                         '포지션': pos,
-                        '선수명': name,
+                        '선수명': translate_player_name(name),
                         '시즌타율': avg,
                         '타수': ab,
                         '득점': r_val,
@@ -1027,7 +1142,7 @@ def fetch_game_player_stats(stats_url, target_team_jp):
                         
                     pitchers.append({
                         '결과': wl,
-                        '선수명': name,
+                        '선수명': translate_player_name(name),
                         '시즌방어율': era,
                         '이닝': ip,
                         '투구수': np,
@@ -1218,6 +1333,273 @@ with tab3:
                     df_pitchers = pd.DataFrame(pitchers)
                     st.dataframe(df_pitchers, use_container_width=True, hide_index=True)
 
+    # --- [선수 능력치 비교 시뮬레이터] ---
+    st.markdown("---")
+    st.subheader("📊 NPB 규정타석 타자 스탯 비교 시뮬레이터")
+    st.markdown("NPB 공식 홈페이지에서 실시간 규정타석 타자 데이터를 가져와 비교합니다. 구단별 필터를 사용해 선수를 간편하게 선택하고 스탯을 비교해 보세요.")
+
+    # Star players database as fallback
+    PLAYER_DATABASE = {
+        "무라카미 무네타카 (야쿠르트)": {
+            "name": "무라카미 무네타카",
+            "타율": 0.280,
+            "홈런": 35,
+            "출루율": 0.380,
+            "장타율": 0.550,
+            "도루": 5,
+            "team": "야쿠르트 스왈로스",
+            "color": "#475569"
+        },
+        "야나기타 유키 (소프트뱅크)": {
+            "name": "야나기타 유키",
+            "타율": 0.305,
+            "홈런": 22,
+            "출루율": 0.395,
+            "장타율": 0.510,
+            "도루": 10,
+            "team": "소프트뱅크 호크스",
+            "color": "#FBBF24"
+        },
+        "오카모토 카즈마 (요미우리)": {
+            "name": "오카모토 카즈마",
+            "타율": 0.278,
+            "홈런": 34,
+            "출루율": 0.365,
+            "장타율": 0.540,
+            "도루": 2,
+            "team": "요미우리 자이언츠",
+            "color": "#F97316"
+        },
+        "콘도 健介 (소프트뱅크)": {
+            "name": "콘도 켄스케",
+            "타율": 0.299,
+            "홈런": 25,
+            "출루율": 0.418,
+            "장타율": 0.554,
+            "도루": 9,
+            "team": "소프트뱅크 호크스",
+            "color": "#EAB308"
+        },
+        "아키야마 쇼고 (히로시마)": {
+            "name": "아키야마 쇼고",
+            "타율": 0.285,
+            "홈런": 6,
+            "출루율": 0.345,
+            "장타율": 0.380,
+            "도루": 8,
+            "team": "히로시마 도요 카프",
+            "color": "#EF4444"
+        },
+        "사토 테루아키 (한신)": {
+            "name": "사토 테루아키",
+            "타율": 0.353,
+            "홈런": 15,
+            "출루율": 0.435,
+            "장타율": 0.670,
+            "도루": 4,
+            "team": "한신 타이거스",
+            "color": "#EAB308"
+        },
+        "만나미 츄세이 (니혼햄)": {
+            "name": "만나미 츄세이",
+            "타율": 0.265,
+            "홈런": 25,
+            "출루율": 0.320,
+            "장타율": 0.470,
+            "도루": 4,
+            "team": "니혼햄 파이터즈",
+            "color": "#06B6D4"
+        },
+        "겐다 소스케 (세이부)": {
+            "name": "겐다 소스케",
+            "타율": 0.250,
+            "홈런": 1,
+            "출루율": 0.310,
+            "장타율": 0.300,
+            "도루": 15,
+            "team": "세이부 라이온즈",
+            "color": "#2563EB"
+        }
+    }
+
+    # Fetch from NPB with cache and fallback
+    @st.cache_data(ttl=3600)
+    def get_cached_qualified_batters():
+        try:
+            res = fetch_qualified_batters()
+            if res:
+                return res
+        except Exception:
+            pass
+        return {}
+
+    all_batters = get_cached_qualified_batters()
+    if not all_batters:
+        all_batters = PLAYER_DATABASE
+
+    # Unique list of teams in the database
+    teams_list = sorted(list(set(player["team"] for player in all_batters.values())))
+    teams_options = ["전체"] + teams_list
+
+    # Filters and Dropdowns for Player 1 & Player 2
+    col_filter1, col_filter2 = st.columns(2)
+    
+    with col_filter1:
+        st.markdown("##### 👤 첫 번째 선수")
+        p1_team_filter = st.selectbox("구단 필터 (선수 1)", options=teams_options, key="p1_team_filter")
+        
+        # Filter player list based on selected team
+        if p1_team_filter == "전체":
+            p1_options = list(all_batters.keys())
+        else:
+            p1_options = [k for k, v in all_batters.items() if v["team"] == p1_team_filter]
+            
+        if not p1_options: # Fallback if empty
+            p1_options = list(all_batters.keys())
+            
+        player1_name = st.selectbox("선수 1 선택", options=p1_options, key="player1_select")
+
+    with col_filter2:
+        st.markdown("##### 👤 두 번째 선수")
+        p2_team_filter = st.selectbox("구단 필터 (선수 2)", options=teams_options, key="p2_team_filter")
+        
+        # Filter player list based on selected team
+        if p2_team_filter == "전체":
+            p2_options = list(all_batters.keys())
+        else:
+            p2_options = [k for k, v in all_batters.items() if v["team"] == p2_team_filter]
+            
+        if not p2_options: # Fallback if empty
+            p2_options = list(all_batters.keys())
+            
+        # Try to select the second option as default if available
+        default_p2_idx = 1 if len(p2_options) > 1 else 0
+        player2_name = st.selectbox("선수 2 선택", options=p2_options, index=default_p2_idx, key="player2_select")
+
+    p1_data = all_batters[player1_name]
+    p2_data = all_batters[player2_name]
+
+    # Metrics limits for normalization
+    METRIC_LIMITS = {
+        "타율": {"min": 0.200, "max": 0.350, "format": "{:.3f}", "unit": ""},
+        "홈런": {"min": 0.0, "max": 50.0, "format": "{:.0f}", "unit": "개"},
+        "출루율": {"min": 0.250, "max": 0.450, "format": "{:.3f}", "unit": ""},
+        "장타율": {"min": 0.300, "max": 0.650, "format": "{:.3f}", "unit": ""},
+        "도루": {"min": 0.0, "max": 40.0, "format": "{:.0f}", "unit": "개"}
+    }
+
+    def normalize(val, limit):
+        scaled = 100 * (val - limit["min"]) / (limit["max"] - limit["min"])
+        return max(0.0, min(100.0, scaled))
+
+    categories = list(METRIC_LIMITS.keys())
+    categories_closed = categories + [categories[0]]
+    
+    p1_vals_norm = [normalize(p1_data[cat], METRIC_LIMITS[cat]) for cat in categories]
+    p1_vals_norm_closed = p1_vals_norm + [p1_vals_norm[0]]
+    
+    p2_vals_norm = [normalize(p2_data[cat], METRIC_LIMITS[cat]) for cat in categories]
+    p2_vals_norm_closed = p2_vals_norm + [p2_vals_norm[0]]
+
+    # Formatted hovertext
+    p1_hover = [f"{cat}: {METRIC_LIMITS[cat]['format'].format(p1_data[cat])}{METRIC_LIMITS[cat]['unit']}" for cat in categories]
+    p1_hover_closed = p1_hover + [p1_hover[0]]
+    
+    p2_hover = [f"{cat}: {METRIC_LIMITS[cat]['format'].format(p2_data[cat])}{METRIC_LIMITS[cat]['unit']}" for cat in categories]
+    p2_hover_closed = p2_hover + [p2_hover[0]]
+
+    # Create Plotly Radar Chart
+    fig = go.Figure()
+
+    # Player 1 Trace
+    fig.add_trace(go.Scatterpolar(
+        r=p1_vals_norm_closed,
+        theta=categories_closed,
+        fill='toself',
+        name=player1_name,
+        hoverinfo='text',
+        text=p1_hover_closed,
+        line=dict(color=p1_data["color"], width=2),
+        fillcolor=p1_data["color"],
+        opacity=0.3
+    ))
+
+    # Player 2 Trace
+    fig.add_trace(go.Scatterpolar(
+        r=p2_vals_norm_closed,
+        theta=categories_closed,
+        fill='toself',
+        name=player2_name,
+        hoverinfo='text',
+        text=p2_hover_closed,
+        line=dict(color=p2_data["color"], width=2),
+        fillcolor=p2_data["color"],
+        opacity=0.3
+    ))
+
+    # Layout styling
+    text_color = "#f8fafc" if st.session_state['dark_mode'] else "#0f172a"
+    grid_color = "#334155" if st.session_state['dark_mode'] else "#cbd5e1"
+    bg_color = "rgba(30, 41, 59, 0.5)" if st.session_state['dark_mode'] else "rgba(255, 255, 255, 0.5)"
+
+    fig.update_layout(
+        polar=dict(
+            radialaxis=dict(
+                visible=True,
+                range=[0, 100],
+                showticklabels=False,
+                gridcolor=grid_color,
+                linecolor=grid_color
+            ),
+            angularaxis=dict(
+                gridcolor=grid_color,
+                linecolor=grid_color,
+                tickfont=dict(size=12, color=text_color, family="Noto Sans KR, sans-serif")
+            ),
+            bgcolor=bg_color
+        ),
+        showlegend=True,
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
+        font=dict(color=text_color),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=-0.15,
+            xanchor="center",
+            x=0.5,
+            font=dict(size=12, color=text_color)
+        ),
+        margin=dict(t=30, b=40, l=40, r=40),
+        height=450
+    )
+
+    # Use 2-column layout: Left contains stat table, Right contains the radar chart
+    col_table, col_chart = st.columns([1, 1.2])
+
+    with col_table:
+        st.markdown("<div style='margin-top: 20px;'></div>", unsafe_allow_html=True)
+        # Create comparison dataframe
+        comparison_df = pd.DataFrame({
+            "지표": categories,
+            p1_data["name"]: [f"{METRIC_LIMITS[c]['format'].format(p1_data[c])}{METRIC_LIMITS[c]['unit']}" for c in categories],
+            p2_data["name"]: [f"{METRIC_LIMITS[c]['format'].format(p2_data[c])}{METRIC_LIMITS[c]['unit']}" for c in categories],
+        })
+        st.dataframe(comparison_df, use_container_width=True, hide_index=True)
+        
+        # Add team info cards
+        st.markdown(f"""
+        <div style="padding: 12px; border-radius: 8px; background-color: {p1_data['color']}22; border: 1px solid {p1_data['color']}; margin-top: 10px; color: {text_color};">
+            <strong>{p1_data['name']}</strong>: {p1_data['team']}
+        </div>
+        <div style="padding: 12px; border-radius: 8px; background-color: {p2_data['color']}22; border: 1px solid {p2_data['color']}; margin-top: 10px; color: {text_color};">
+            <strong>{p2_data['name']}</strong>: {p2_data['team']}
+        </div>
+        """, unsafe_allow_html=True)
+
+    with col_chart:
+        st.plotly_chart(fig, use_container_width=True)
+
 # --- [네 번째 탭] 구장 및 공식 사이트 ---
 with tab4:
     st.subheader("🏟️ 구단별 홈 구장 및 공식 웹사이트")
@@ -1293,12 +1675,189 @@ transition: background-color 0.2s;
         st.markdown(textwrap.dedent(card_html), unsafe_allow_html=True)
         
     with col_map:
-        map_data = pd.DataFrame([{
-            'lat': info['lat'],
-            'lon': info['lon']
-        }])
         st.markdown("<div style='margin-top: 10px;'></div>", unsafe_allow_html=True)
-        st.map(map_data, zoom=14, use_container_width=True)
+        
+        stadium_mapping = {
+            "ソフトバンク": "PayPay Dome",
+            "巨人": "Tokyo Dome",
+            "阪神": "Koshien Stadium"
+        }
+        
+        has_precision = selected_key in stadium_mapping
+        
+        if has_precision:
+            stadium_name = stadium_mapping[selected_key]
+            st.markdown(f"### 📐 {stadium_name} 실시간 정밀 측량 시뮬레이터")
+            
+            defaults = stadium_layouts.STADIUM_DEFAULTS[stadium_name]
+            poly_coords = stadium_layouts.STADIUM_POLYGONS[stadium_name]
+            
+            # 펜스 및 홈플레이트 미세 조정 패널
+            with st.expander("🛠️ 홈플레이트 위치 & 펜스 측정선 세부 조정", expanded=True):
+                col_ctrl1, col_ctrl2 = st.columns(2)
+                with col_ctrl1:
+                    hp_lat = st.number_input("홈플레이트 위도 (Latitude)", value=defaults["home_plate"][0], format="%.6f", step=0.00001, key=f"hp_lat_{stadium_name}")
+                    hp_lon = st.number_input("홈플레이트 경도 (Longitude)", value=defaults["home_plate"][1], format="%.6f", step=0.00001, key=f"hp_lon_{stadium_name}")
+                    bearing = st.slider("구장 방향 각도 (CF Bearing, 도)", min_value=0.0, max_value=360.0, value=defaults["bearing"], step=0.1, key=f"bearing_{stadium_name}")
+                with col_ctrl2:
+                    left_m = st.slider("좌선 펜스 거리 (Left Pole, m)", min_value=80.0, max_value=150.0, value=defaults["left_m"], step=0.5, key=f"left_m_{stadium_name}")
+                    l_center_m = st.slider("좌중간 펜스 거리 (Left-Center, m)", min_value=90.0, max_value=150.0, value=defaults["l_center_m"], step=0.5, key=f"l_center_{stadium_name}")
+                    center_m = st.slider("중앙 펜스 거리 (Center, m)", min_value=100.0, max_value=150.0, value=defaults["center_m"], step=0.5, key=f"center_m_{stadium_name}")
+                    r_center_m = st.slider("우중간 펜스 거리 (Right-Center, m)", min_value=90.0, max_value=150.0, value=defaults["r_center_m"], step=0.5, key=f"r_center_{stadium_name}")
+                    right_m = st.slider("우선 펜스 거리 (Right Pole, m)", min_value=80.0, max_value=150.0, value=defaults["right_m"], step=0.5, key=f"right_m_{stadium_name}")
+
+            home_plate = (hp_lat, hp_lon)
+            
+            # 건물 면적 계산
+            building_area = stadium_layouts.calculate_polygon_area(poly_coords)
+            building_area_py = building_area * 0.3025
+            
+            # 외야 펜스 점 계산
+            outfield_pts = stadium_layouts.get_outfield_points(
+                home_plate, bearing, left_m, l_center_m, center_m, r_center_m, right_m
+            )
+            
+            # 경기장(Playing Field) 면적 계산
+            playing_field_area = stadium_layouts.get_playing_field_area(home_plate, outfield_pts)
+            playing_field_area_py = playing_field_area * 0.3025
+            
+            # 면적 측정 메트릭 표시
+            col_m1, col_m2 = st.columns(2)
+            with col_m1:
+                st.metric(
+                    label="🏟️ 구장 전체 건물 면적 (OSM 실측)", 
+                    value=f"{building_area:,.1f} ㎡",
+                    help="OpenStreetMap의 건물 외곽선 폴리곤 좌표를 미터법 투영 후 산출한 실측 면적입니다."
+                )
+                st.caption(f"(약 {building_area_py:,.1f} 평)")
+            with col_m2:
+                st.metric(
+                    label="⚾ 규격 기준 경기장 면적 (Playing Field)", 
+                    value=f"{playing_field_area:,.1f} ㎡",
+                    help="홈플레이트에서 파울 라인과 외야 펜스로 둘러싸인 플레이 영역의 총 면적입니다."
+                )
+                st.caption(f"(약 {playing_field_area_py:,.1f} 평)")
+
+            # 지도 생성
+            map_center = [defaults["center_coords"][0], defaults["center_coords"][1]]
+            m = folium.Map(location=map_center, zoom_start=18, max_zoom=21, tiles="OpenStreetMap")
+            
+            # 1. 구장 건물 폴리곤
+            folium.Polygon(
+                locations=poly_coords,
+                color="#2563eb" if not st.session_state['dark_mode'] else "#38bdf8",
+                weight=3,
+                fill=True,
+                fill_color="#3b82f6" if not st.session_state['dark_mode'] else "#0284c7",
+                fill_opacity=0.15,
+                tooltip=f"<b>{stadium_name} 건물 외곽선</b><br>실측 면적: {building_area:,.1f}㎡ ({building_area_py:,.1f}평)"
+            ).add_to(m)
+            
+            # 2. 경기장 다각형 영역
+            folium.Polygon(
+                locations=[home_plate] + [
+                    outfield_pts["left"],
+                    outfield_pts["l_center"],
+                    outfield_pts["center"],
+                    outfield_pts["r_center"],
+                    outfield_pts["right"]
+                ] + [home_plate],
+                color="#10b981" if not st.session_state['dark_mode'] else "#34d399",
+                weight=1,
+                fill=True,
+                fill_color="#10b981" if not st.session_state['dark_mode'] else "#059669",
+                fill_opacity=0.12,
+                tooltip=f"<b>경기장 면적 (Playing Field)</b><br>계산 면적: {playing_field_area:,.1f}㎡"
+            ).add_to(m)
+            
+            # 3. 홈플레이트 마커
+            folium.Marker(
+                location=home_plate,
+                popup="<b>홈플레이트 (Home Plate)</b><br>측량 중심점",
+                tooltip="홈플레이트",
+                icon=folium.Icon(color="red", icon="crosshairs", prefix="fa")
+            ).add_to(m)
+            
+            # 4. 외야 펜스 궤적 (Arc)
+            fence_coords = [
+                outfield_pts["left"],
+                outfield_pts["l_center"],
+                outfield_pts["center"],
+                outfield_pts["r_center"],
+                outfield_pts["right"]
+            ]
+            folium.PolyLine(
+                locations=fence_coords,
+                color="#e11d48",
+                weight=4,
+                tooltip="외야 펜스 (Outfield Fence)"
+            ).add_to(m)
+            
+            # 5. 파울 라인 (Foul Lines)
+            folium.PolyLine(
+                locations=[home_plate, outfield_pts["left"]],
+                color="#4b5563" if not st.session_state['dark_mode'] else "#94a3b8",
+                weight=3,
+                dash_array="5, 5",
+                tooltip=f"좌측 파울 라인 (Left Foul Line: {left_m}m)"
+            ).add_to(m)
+            
+            folium.PolyLine(
+                locations=[home_plate, outfield_pts["right"]],
+                color="#4b5563" if not st.session_state['dark_mode'] else "#94a3b8",
+                weight=3,
+                dash_array="5, 5",
+                tooltip=f"우측 파울 라인 (Right Foul Line: {right_m}m)"
+            ).add_to(m)
+            
+            # 6. 정밀 측량 방사형선 및 라벨
+            measurement_lines = [
+                ("좌익선 (Left Line)", outfield_pts["left"], left_m, "#d97706"),
+                ("좌중간 (Left-Center)", outfield_pts["l_center"], l_center_m, "#0891b2"),
+                ("중견선 (Center Line)", outfield_pts["center"], center_m, "#dc2626"),
+                ("우중간 (Right-Center)", outfield_pts["r_center"], r_center_m, "#0891b2"),
+                ("우익선 (Right Line)", outfield_pts["right"], right_m, "#d97706")
+            ]
+            
+            for label, pt, dist, color in measurement_lines:
+                # 방사형 측정선 그리기
+                folium.PolyLine(
+                    locations=[home_plate, pt],
+                    color=color,
+                    weight=2,
+                    dash_array="3, 3"
+                ).add_to(m)
+                
+                # 외야 펜스 끝점에 거리 라벨 마커 추가
+                folium.Marker(
+                    location=pt,
+                    tooltip=f"{label}: {dist:.1f}m",
+                    icon=folium.DivIcon(
+                        html=f"""<div style="
+                            background-color: {color};
+                            color: white;
+                            font-size: 10px;
+                            font-weight: 700;
+                            padding: 2px 5px;
+                            border-radius: 4px;
+                            border: 1px solid white;
+                            white-space: nowrap;
+                            box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+                        ">{dist:.1f}m</div>"""
+                    )
+                ).add_to(m)
+            
+            # Streamlit-Folium 렌더링
+            st_folium(m, height=500, use_container_width=True)
+            
+        else:
+            st.warning("⚠️ 이 구단은 기본 지도만 제공됩니다. 소프트뱅크(PayPay 돔), 요미우리(도쿄 돔), 한신(고시엔 구장) 중 하나를 선택하면 정밀 측량 시뮬레이터 기능을 사용할 수 있습니다!")
+            map_data = pd.DataFrame([{
+                'lat': info['lat'],
+                'lon': info['lon']
+            }])
+            st.markdown("<div style='margin-top: 10px;'></div>", unsafe_allow_html=True)
+            st.map(map_data, zoom=14, use_container_width=True)
 
 # --- [다섯 번째 탭] 리그 순위표 ---
 with tab5:
