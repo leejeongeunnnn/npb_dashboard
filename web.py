@@ -271,41 +271,474 @@ def fetch_league_standings():
         print(f"[ERROR] Fetch standings failed: {e}")
         return None, None
 
-# 야후 재팬 야구 뉴스 헤드라인 크롤링 함수
-def fetch_npb_news():
-    url = "https://baseball.yahoo.co.jp/npb/"
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+# 번역 캐시 (동일 문구 중복 요청 방지 및 로딩 속도 극대화)
+_TRANS_CACHE = {}
+
+# 일본어 텍스트를 한국어로 번역하는 헬퍼 함수
+def translate_text_kr(text):
+    if not text:
+        return ""
+    if text in _TRANS_CACHE:
+        return _TRANS_CACHE[text]
+
+    # 1. 12개 구단 한국어 명칭 치환
+    clean = text
+    for jp, info in TEAM_INFO.items():
+        clean = clean.replace(jp, info['kr'])
+    
+    # 2. 야구 전문 용어 & 비경기 소식(훈련, 드래프트, 코칭스태프, 전력외 등) 치환 사전
+    baseball_terms = {
+        "クライマックスシリーズ": "클라이맥스 시리즈",
+        "クライマックス": "클라이맥스",
+        "ファーストステージ": "퍼스트 스테이지",
+        "ファイナルステージ": "파이널 스테이지",
+        "ファーストS": "퍼스트 스테이지",
+        "ファイナルS": "파이널 스테이지",
+        "日本シリーズ": "일본시리즈",
+        "セ・リーグ": "센트럴 리그",
+        "パ・リーグ": "퍼시픽 리그",
+        "ドラフト会議": "드래프트 회의",
+        "ドラフト考察": "드래프트 분석",
+        "ドラフト": "드래프트",
+        "スカウト": "스카우트",
+        "候補ランキング": "후보 랭킹",
+        "候補": "후보",
+        "指名": "지명",
+        "1位指名": "1차 지명",
+        "2位指名": "2차 지명",
+        "高校生投手": "고교 투수",
+        "高校生": "고교생",
+        "大学生": "대학생",
+        "社会人": "사회인 야구",
+        "戦力外通告": "전력외 통고(방출)",
+        "戦力外": "전력외 통고",
+        "現役ドラフト": "현역 드래프트",
+        "自由契約": "자유계약",
+        "引退表明": "은퇴 선언",
+        "引退": "은퇴",
+        "退任": "퇴임",
+        "退団": "퇴단",
+        "解任": "해임",
+        "就任": "취임",
+        "去就": "거취",
+        "トレード": "트레이드",
+        "契約更改": "계약 갱신",
+        "契約": "계약",
+        "残留": "잔류",
+        "移籍": "이적",
+        "秋季キャンプ": "가을 마무리 캠프",
+        "秋季練習": "가을 훈련",
+        "キャンプ": "캠프(훈련)",
+        "自主トレ": "개인 훈련",
+        "実戦形式": "실전 형식",
+        "実戦": "실전",
+        "シート打撃": "라이브 배팅",
+        "打撃練習": "타격 훈련",
+        "ブルペン": "불펜 투구",
+        "登板": "등판",
+        "調整順調": "컨디션 조율 순조",
+        "調整": "조율(준비)",
+        "共同記者会見": "공동 기자회견",
+        "記者会見": "기자회견",
+        "会見": "기자회견",
+        "監督代行": "감독대행",
+        "新監督": "신임 감독",
+        "監督": "감독",
+        "ヘッドコーチ": "수석코치",
+        "打撃コーチ": "타격코치",
+        "投手コーチ": "투수코치",
+        "首脳陣": "코칭스태프",
+        "コーチ": "코치",
+        "無失点": "무실점",
+        "完封負け": "완봉패",
+        "完封": "완봉",
+        "リレー": "계투",
+        "先頭打者弾": "선두타자 홈런",
+        "本塁打": "홈런",
+        "ホームラン": "홈런",
+        "突破": "진출",
+        "進出": "진출",
+        "連勝": "연승",
+        "連敗": "연패",
+        "白星": "승리",
+        "黒星": "패배",
+        "逆転": "역전",
+        "サヨナラ": "끝내기",
+        "適時打": "적시타",
+        "猛打賞": "맹타상",
+        "好投": "호투",
+        "力投": "역투",
+        "奪三振": "탈삼진",
+        "勝利": "승리",
+        "敗戦": "패배",
+        "終戦": "시즌 마감",
+        "敗退": "탈락",
+        "二刀流": "이도류",
+        "開幕投手": "개막 투수",
+        "守護神": "마무리 투수",
+        "エース": "에이스",
+        "予告先発": "예고 선발",
+        "先発": "선발",
+        "中継ぎ": "중간 계투",
+        "抑え": "마무리",
+        "1군": "1군",
+        "2군": "2군",
+        "ファーム": "2군 팜",
+        "フェニックス・リーグ": "피닉스 교육리그",
+        "フェニックスリーグ": "피닉스 교육리그"
     }
+    for j_term, k_term in baseball_terms.items():
+        clean = clean.replace(j_term, k_term)
+        
+    # 3. 선수 이름 사전 치환
+    for jp_name, kr_name in PLAYER_NAME_TRANSLATION.items():
+        if len(jp_name) >= 2 and jp_name in clean:
+            clean = clean.replace(jp_name, kr_name)
+            
+    # 4. MyMemory 무료 번역 API 시도 (자연스러운 한국어 문장)
     try:
-        response = requests.get(url, headers=headers)
-        response.encoding = 'utf-8'
-        soup = BeautifulSoup(response.text, 'html.parser')
+        import urllib.parse
+        api_url = f"https://api.mymemory.translated.net/get?q={urllib.parse.quote(text[:200])}&langpair=ja|ko"
+        res = requests.get(api_url, timeout=2.5)
+        if res.status_code == 200:
+            data = res.json()
+            if 'responseData' in data and data['responseData'].get('translatedText'):
+                trans_result = data['responseData']['translatedText']
+                # 번역 결과 내에서도 팀명 보정
+                for jp, info in TEAM_INFO.items():
+                    trans_result = trans_result.replace(jp, info['kr'])
+                _TRANS_CACHE[text] = trans_result
+                return trans_result
+    except Exception:
+        pass
         
-        news_list = []
-        seen_links = set()
-        
-        for a in soup.find_all('a', href=True):
-            href = a['href']
-            if 'news.yahoo.co.jp/articles/' in href:
-                title = a.text.strip()
-                if title and len(title) > 10 and href not in seen_links:
-                    seen_links.add(href)
-                    translated_title = title
-                    # 일본어 팀명을 한국어로 변환
-                    for jp, info in TEAM_INFO.items():
-                        translated_title = translated_title.replace(jp, info['kr'])
+    _TRANS_CACHE[text] = clean
+    return clean
+
+# 구단별 검색 키워드 매핑 (일본어 정식 구단명 및 주요 약칭)
+TEAM_SEARCH_KEYWORDS = {
+    "소프트뱅크": "福岡ソフトバンクホークス",
+    "소프트뱅크 호크스": "福岡ソフトバンクホークス",
+    "오릭스": "オリックス・バファローズ",
+    "오릭스 버팔로즈": "オリックス・バファローズ",
+    "지바 롯데": "千葉ロッテマリーンズ",
+    "지바 롯데 마린스": "千葉ロッテマリーンズ",
+    "롯데": "千葉ロッテマリーンズ",
+    "라쿠텐": "東北楽天ゴールデンイーグルス",
+    "라쿠텐 골든이글스": "東北楽天ゴールデンイーグルス",
+    "세이부": "埼玉西武ライオンズ",
+    "세이부 라이온즈": "埼玉西武ライオンズ",
+    "니혼햄": "北海道日本ハムファイターズ",
+    "니혼햄 파이터즈": "北海道日本ハムファイターズ",
+    "한신": "阪神タイガース",
+    "한신 타이거스": "阪神タイガース",
+    "요미우리": "読売ジャイアンツ",
+    "요미우리 자이언츠": "読売ジャイアンツ",
+    "자이언츠": "読売ジャイアンツ",
+    "DeNA": "横浜DeNAベイスターズ",
+    "요코하마": "横浜DeNAベイスターズ",
+    "요코하마 DeNA": "横浜DeNAベイスターズ",
+    "요코하마 DeNA 베이스타스": "横浜DeNAベイスターズ",
+    "히로시마": "広島東洋カープ",
+    "히로시마 도요 카프": "広島東洋カープ",
+    "야쿠르트": "東京ヤクルトスワローズ",
+    "야쿠르트 스왈로스": "東京ヤクルトスワローズ",
+    "주니치": "中日ドラゴンズ",
+    "주니치 드래곤즈": "中日ドラゴンズ"
+}
+
+# 기사 텍스트에서 관련 구단을 자동 판정하는 헬퍼
+def detect_team_badge(title_text):
+    for jp, info in TEAM_INFO.items():
+        if jp in title_text or info['kr'] in title_text:
+            return info['kr'], info['color']
+    return "NPB 종합", "#3b82f6"
+
+# 기사의 분야/카테고리를 자동 분류하는 헬퍼
+def detect_news_category(title_text, desc_text=""):
+    full_text = title_text + " " + desc_text
+    if any(k in full_text for k in ['ドラフト', 'スカウト', '指名', '1位', '高校生', '大学生', '社会人']):
+        return "🎯 드래프트 & 스카우트", "draft"
+    if any(k in full_text for k in ['監督', 'コーチ', '就任', '退任', '解任', '首脳陣', '人事', '退団']):
+        return "👔 감독·코치진 개편", "coach"
+    if any(k in full_text for k in ['戦力外', '引退', 'FA', 'トレード', '契約', '移籍', '現役ドラフト', '去就', '自由契約']):
+        return "📋 전력외·은퇴·이적", "roster"
+    if any(k in full_text for k in ['練習', 'キャンプ', '調整', '登板', 'ブルペン', '実戦', 'シート打撃', 'フェニックス', '自主トレ']):
+        return "⚾ 선수단 훈련 & 동향", "training"
+    if any(k in full_text for k in ['インタビュー', '語る', '明かす', '決意', '胸中', 'コメント', '会見', '対談']):
+        return "🎙 인터뷰 & 코멘트", "interview"
+    if any(k in full_text for k in ['CS', 'クライマックス', '日本シリーズ', '勝', '敗', '完封', 'サヨナラ', '本塁打', '突破', '終戦', 'タイ', '王手']):
+        return "🏆 포스트시즌 & 경기", "game"
+    return "📰 구단 소식", "general"
+
+# 당일 실시간 일본 프로야구 뉴스 크롤링 및 한국어 요약 함수 (구단별 + 비경기 분야 필터 지원)
+@st.cache_data(ttl=300)
+def fetch_npb_news(selected_team="전체 구단", news_category="전체"):
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+    }
+    news_list = []
+    seen_titles = set()
+    import urllib.parse
+    import re
+    import html
+
+    # 팀명 정제
+    clean_team_key = selected_team
+    for k in TEAM_SEARCH_KEYWORDS.keys():
+        if k in selected_team:
+            clean_team_key = k
+            break
+            
+    is_team_specific = selected_team and selected_team not in ["전체 구단", "⚾ 전체 구단", "⚾ 전체 구단 (종합 & 12구단 속보)"]
+    
+    # 1. 특정 구단이 선택된 경우: 해당 구단의 당일 뉴스(훈련, 인터뷰, 인사, 드래프트 등) 수집
+    if is_team_specific:
+        search_kw = TEAM_SEARCH_KEYWORDS.get(clean_team_key, selected_team)
+        q_enc = urllib.parse.quote(f"{search_kw} when:2d")
+        url = f"https://news.google.com/rss/search?q={q_enc}&hl=ja&gl=JP&ceid=JP:ja"
+        try:
+            res = requests.get(url, headers=headers, timeout=6)
+            items = re.findall(r'<item>(.*?)</item>', res.text, re.DOTALL)
+            for it in items[:40]:
+                t_m = re.search(r'<title>(.*?)</title>', it)
+                l_m = re.search(r'<link>(.*?)</link>', it)
+                p_m = re.search(r'<pubDate>(.*?)</pubDate>', it)
+                d_m = re.search(r'<description>(.*?)</description>', it)
+                
+                raw_t = html.unescape(t_m.group(1)) if t_m else ''
+                link = l_m.group(1) if l_m else ''
+                pub_date = p_m.group(1) if p_m else ''
+                desc_raw = html.unescape(d_m.group(1)) if d_m else ''
+                
+                # 언론사 분리
+                media = "스포츠 뉴스"
+                if " - " in raw_t:
+                    clean_t, media = raw_t.rsplit(" - ", 1)
+                else:
+                    clean_t = raw_t
+                    
+                if clean_t not in seen_titles:
+                    seen_titles.add(clean_t)
+                    time_display = "오늘 최신"
+                    if pub_date:
+                        try:
+                            dt = datetime.datetime.strptime(pub_date[:25].strip(), "%a, %d %b %Y %H:%M:%S")
+                            dt_kr = dt + datetime.timedelta(hours=9)
+                            time_display = f"오늘 {dt_kr.strftime('%H:%M')}"
+                        except Exception:
+                            time_display = "당일 속보"
+                            
+                    cat_label, cat_type = detect_news_category(clean_t, desc_raw)
+                    
+                    # 카테고리 필터링
+                    if "비경기" in news_category and cat_type == "game":
+                        continue
+                    if "드래프트" in news_category and cat_type not in ["draft", "roster"]:
+                        continue
+                    if "감독" in news_category and cat_type != "coach":
+                        continue
+                    if "경기 결과" in news_category and cat_type != "game":
+                        continue
+                        
+                    kr_t = translate_text_kr(clean_t)
+                    
+                    # 요약문 생성
+                    team_disp_kr = selected_team.replace("⚾", "").replace("👑", "").strip()
+                    if cat_type == "draft":
+                        kr_summary = f"{team_disp_kr}의 2026 프로야구 드래프트 유력 지명 후보 및 스카우팅 분석 보도입니다."
+                    elif cat_type == "coach":
+                        kr_summary = f"{team_disp_kr} 코칭스태프 개편, 신임 감독 선임 및 지도자 인사와 관련된 현지 속보입니다."
+                    elif cat_type == "roster":
+                        kr_summary = f"{team_disp_kr} 선수단 전력외 통고, FA, 트레이드 및 계약 갱신 관련 소식입니다."
+                    elif cat_type == "training":
+                        kr_summary = f"{team_disp_kr} 선수단의 가을 마무리 캠프 및 포스트시즌 대비 실전 훈련/컨디션 조율 소식입니다."
+                    elif cat_type == "interview":
+                        kr_summary = f"{team_disp_kr} 선수·지도자의 시즌 소회 및 다음 시즌을 향한 인터뷰 보도입니다."
+                    elif cat_type == "game":
+                        kr_summary = f"{team_disp_kr} 경기 결과 및 주요 선수 활약상에 관한 실시간 경기 속보입니다."
+                    else:
+                        kr_summary = f"{team_disp_kr} 구단의 최신 소식 및 공식 발표 동향입니다."
+                        
+                    team_jp = get_japanese_team_name(clean_team_key)
+                    team_color = TEAM_INFO.get(team_jp, {}).get('color', '#3b82f6')
+                    team_kr = TEAM_INFO.get(team_jp, {}).get('kr', selected_team)
                     
                     news_list.append({
-                        'title': translated_title,
-                        'url': href
+                        'title': kr_t,
+                        'summary': kr_summary,
+                        'url': link,
+                        'time': time_display,
+                        'media': media,
+                        'team': team_kr,
+                        'color': team_color,
+                        'category': cat_label
                     })
-                    if len(news_list) >= 10:
+                    
+                    if len(news_list) >= 20:
                         break
-        return news_list
-    except Exception as e:
-        print(f"[ERROR] Fetch news failed: {e}")
-        return []
+        except Exception as e:
+            print(f"[ERROR] Fetch team specific news failed: {e}")
+
+    # 2. 전체 구단이 선택되었거나, 특정 구단 기사가 적은 경우
+    if not is_team_specific or len(news_list) < 5:
+        # 전체 구단인 경우: 비경기 뉴스 쿼리와 종합 쿼리를 적절히 혼합
+        queries = []
+        if "비경기" in news_category:
+            queries = ["プロ野球 (ドラフト OR 監督 OR 練習 OR 戦力外 OR キャンプ OR コーチ) when:2d"]
+        elif "드래프트" in news_category:
+            queries = ["プロ野球 (ドラフト OR スカウト OR 戦力外 OR 引退) when:2d"]
+        elif "감독" in news_category:
+            queries = ["プロ野球 (監督 OR コーチ OR 就任 OR 首脳陣) when:2d"]
+        elif "경기 결과" in news_category:
+            queries = ["NPB プロ野球 クライマックス when:2d"]
+        else:
+            # 기본 종합: 비경기(선수단/드래프트/감독) 소식과 현장 종합을 골고루 수집!
+            queries = [
+                "プロ野球 (ドラフト OR 監督 OR 練習 OR 戦力外 OR キャンプ) when:2d",
+                "NPB プロ野球 when:2d"
+            ]
+            
+        for q in queries:
+            try:
+                q_enc = urllib.parse.quote(q)
+                url = f"https://news.google.com/rss/search?q={q_enc}&hl=ja&gl=JP&ceid=JP:ja"
+                res = requests.get(url, headers=headers, timeout=6)
+                items = re.findall(r'<item>(.*?)</item>', res.text, re.DOTALL)
+                for it in items[:30]:
+                    t_m = re.search(r'<title>(.*?)</title>', it)
+                    l_m = re.search(r'<link>(.*?)</link>', it)
+                    p_m = re.search(r'<pubDate>(.*?)</pubDate>', it)
+                    d_m = re.search(r'<description>(.*?)</description>', it)
+                    
+                    raw_t = html.unescape(t_m.group(1)) if t_m else ''
+                    link = l_m.group(1) if l_m else ''
+                    pub_date = p_m.group(1) if p_m else ''
+                    desc_raw = html.unescape(d_m.group(1)) if d_m else ''
+                    
+                    media = "스포츠 뉴스"
+                    if " - " in raw_t:
+                        clean_t, media = raw_t.rsplit(" - ", 1)
+                    else:
+                        clean_t = raw_t
+                        
+                    if clean_t not in seen_titles:
+                        seen_titles.add(clean_t)
+                        time_display = "오늘 최신"
+                        if pub_date:
+                            try:
+                                dt = datetime.datetime.strptime(pub_date[:25].strip(), "%a, %d %b %Y %H:%M:%S")
+                                dt_kr = dt + datetime.timedelta(hours=9)
+                                time_display = f"오늘 {dt_kr.strftime('%H:%M')}"
+                            except Exception:
+                                time_display = "당일 속보"
+                                
+                        cat_label, cat_type = detect_news_category(clean_t, desc_raw)
+                        
+                        if "비경기" in news_category and cat_type == "game":
+                            continue
+                        if "드래프트" in news_category and cat_type not in ["draft", "roster"]:
+                            continue
+                        if "감독" in news_category and cat_type != "coach":
+                            continue
+                        if "경기 결과" in news_category and cat_type != "game":
+                            continue
+                            
+                        kr_t = translate_text_kr(clean_t)
+                        team_label, team_col = detect_team_badge(clean_t)
+                        
+                        if cat_type == "draft":
+                            kr_summary = "2026 프로야구 드래프트 유력 후보 및 12구단 스카우팅 분석 보도입니다."
+                        elif cat_type == "coach":
+                            kr_summary = "12구단 감독·코칭스태프 개편 및 차기 지도자 선임 관련 현지 보도입니다."
+                        elif cat_type == "roster":
+                            kr_summary = "시즌 종료에 따른 12구단 전력외 통고(방출), FA, 은퇴 및 이적 동향입니다."
+                        elif cat_type == "training":
+                            kr_summary = "가을 마무리 훈련(추계 캠프) 및 다음 시즌을 위한 선수단 컨디션 조율 소식입니다."
+                        elif cat_type == "interview":
+                            kr_summary = "주요 선수 및 지도자의 현장 인터뷰와 시즌 결산 코멘트입니다."
+                        elif cat_type == "game":
+                            kr_summary = "클라이맥스 시리즈(CS) 및 경기 결과, 선수 활약상에 관한 실시간 속보입니다."
+                        else:
+                            kr_summary = "일본 프로야구(NPB) 당일 주요 현지 뉴스입니다."
+                            
+                        news_list.append({
+                            'title': kr_t,
+                            'summary': kr_summary,
+                            'url': link,
+                            'time': time_display,
+                            'media': media,
+                            'team': team_label,
+                            'color': team_col,
+                            'category': cat_label
+                        })
+                        
+                        if len(news_list) >= 25:
+                            break
+            except Exception as e:
+                print(f"[ERROR] Fetch google news query failed: {e}")
+                
+        # 3. 야후 스포츠 Full-Count RSS 보강 (상세 요약문이 있는 생생한 기사 추가)
+        if len(news_list) < 25:
+            try:
+                fc_url = "https://news.yahoo.co.jp/rss/media/fullcount/all.xml"
+                fc_res = requests.get(fc_url, headers=headers, timeout=5)
+                fc_items = re.findall(r'<item>(.*?)</item>', fc_res.text, re.DOTALL)
+                for it in fc_items:
+                    t_m = re.search(r'<title>(.*?)</title>', it)
+                    l_m = re.search(r'<link>(.*?)</link>', it)
+                    d_m = re.search(r'<description>(.*?)</description>', it)
+                    p_m = re.search(r'<pubDate>(.*?)</pubDate>', it)
+                    
+                    raw_title = html.unescape(t_m.group(1)) if t_m else ''
+                    link = l_m.group(1) if l_m else ''
+                    desc = html.unescape(d_m.group(1)) if d_m else ''
+                    pub_date = p_m.group(1) if p_m else ''
+                    
+                    clean_title = re.sub(r'\(Full-Count\)$', '', raw_title).strip()
+                    
+                    if clean_title and clean_title not in seen_titles:
+                        seen_titles.add(clean_title)
+                        time_display = "오늘 최신"
+                        if pub_date:
+                            try:
+                                dt = datetime.datetime.strptime(pub_date[:25].strip(), "%a, %d %b %Y %H:%M:%S")
+                                dt_kr = dt + datetime.timedelta(hours=9)
+                                time_display = f"오늘 {dt_kr.strftime('%H:%M')}"
+                            except Exception:
+                                time_display = "당일 속보"
+                                
+                        cat_label, cat_type = detect_news_category(clean_title, desc)
+                        
+                        if "비경기" in news_category and cat_type == "game":
+                            continue
+                        if "드래프트" in news_category and cat_type not in ["draft", "roster"]:
+                            continue
+                        if "감독" in news_category and cat_type != "coach":
+                            continue
+                        if "경기 결과" in news_category and cat_type != "game":
+                            continue
+                            
+                        kr_title = translate_text_kr(clean_title)
+                        kr_summary = translate_text_kr(desc[:120]) if desc else "기사 세부 내용은 원문 링크를 통해 확인하실 수 있습니다."
+                        team_label, team_col = detect_team_badge(clean_title + " " + desc)
+                        
+                        news_list.append({
+                            'title': kr_title,
+                            'summary': kr_summary,
+                            'url': link,
+                            'time': time_display,
+                            'media': "Full-Count 야후 스포츠",
+                            'team': team_label,
+                            'color': team_col,
+                            'category': cat_label
+                        })
+                        if len(news_list) >= 25:
+                            break
+            except Exception as e:
+                print(f"[ERROR] Fetch Full-Count RSS failed: {e}")
+                
+    return news_list
 
 # 최애 팀 최근 5경기 결과 크롤링 함수
 def fetch_recent_games(team_id):
@@ -614,7 +1047,7 @@ html, body, [data-testid="stAppViewContainer"], [data-testid="stHeader"] {
     box-shadow: 0 4px 12px rgba(0,0,0,0.06);
 }
 
-.news-card span {
+.news-card .news-title {
     color: #1e3a8a !important;
 }
 
@@ -847,7 +1280,7 @@ h1, h2, h3, h4, h5, h6, p, label, li, span {
     box-shadow: 0 4px 12px rgba(0,0,0,0.3);
 }
 
-.news-card span {
+.news-card .news-title {
     color: #60a5fa !important;
 }
 
@@ -2543,25 +2976,83 @@ with tab5:
 
 # --- [여섯 번째 탭] 주요 야구 뉴스 ---
 with tab6:
-    st.subheader("📰 오늘의 주요 야구 뉴스")
+    st.subheader("📰 오늘의 실시간 일본 프로야구 뉴스")
+    st.markdown("일본 현지 스포츠 언론의 당일 속보를 **한국어 핵심 요약**과 함께 실시간으로 전달합니다. **경기 결과 외에도 각 구단별 선수단 훈련, 인터뷰, 드래프트, 코칭스태프 개편 소식**을 자유롭게 확인하실 수 있습니다.")
     
-    with st.spinner('실시간 주요 야구 뉴스를 불러오는 중...'):
-        news_items = fetch_npb_news()
+    current_fav = st.session_state.get('my_team', '소프트뱅크')
+    
+    col_filter1, col_filter2, col_refresh = st.columns([5, 5, 2])
+    
+    with col_filter1:
+        team_options = [
+            "⚾ 전체 구단 (종합 & 12구단 속보)",
+            f"👑 나의 최애 팀 ({current_fav})",
+            "🐯 한신 타이거스",
+            "🦁 요미우리 자이언츠",
+            "⭐️ 요코하마 DeNA 베이스타스",
+            "🎏 히로시마 도요 카프",
+            "🐧 야쿠르트 스왈로스",
+            "🐉 주니치 드래곤즈",
+            "🦅 소프트뱅크 호크스",
+            "🦊 니혼햄 파이터즈",
+            "🦁 세이부 라이온즈",
+            "⚓️ 지바 롯데 마린스",
+            "🦅 라쿠텐 골든이글스",
+            "🐂 오릭스 버팔로즈"
+        ]
+        selected_team_choice = st.selectbox("🎯 구단 선택", options=team_options, index=0)
+        
+    with col_filter2:
+        cat_options = [
+            "📰 전체 기사 보기",
+            "📋 비경기 소식 (훈련·인터뷰·드래프트·감독 개편)",
+            "🎯 드래프트 & 이적/방출/계약",
+            "👔 감독·코치진 선임 및 개편",
+            "🏆 경기 결과 & 포스트시즌"
+        ]
+        selected_cat_choice = st.selectbox("📂 뉴스 분야 필터", options=cat_options, index=0)
+        
+    with col_refresh:
+        st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+        if st.button("🔄 실시간 새로고침", use_container_width=True):
+            st.cache_data.clear()
+            st.rerun()
+
+    # 구단명 정제
+    if "전체 구단" in selected_team_choice:
+        query_team = "전체 구단"
+    elif "최애 팀" in selected_team_choice:
+        query_team = current_fav
+    else:
+        # 이모지 제거
+        clean_team = re.sub(r'^[^\w가-힣a-zA-Z]+', '', selected_team_choice).strip()
+        query_team = clean_team
+
+    with st.spinner(f"'{query_team}' 관련 일본 현지 실시간 뉴스를 분석 및 번역하는 중..."):
+        news_items = fetch_npb_news(selected_team=query_team, news_category=selected_cat_choice)
         
     if not news_items:
-        st.info("오늘 등록된 주요 야구 뉴스가 없거나 기사를 불러올 수 없습니다.")
+        st.info("선택하신 조건에 해당하는 당일 뉴스가 없거나 일시적인 통신 지연입니다. 다른 구단이나 분야를 선택하시거나 새로고침을 눌러주세요.")
     else:
-        # 뉴스 항목 카드 형태로 출력
+        st.markdown(f"<div style='margin-bottom: 14px; font-weight: 600; font-size: 0.95rem; color: #475569;'>📢 <strong>{query_team}</strong> 관련 최신 기사 <strong>{len(news_items)}건</strong>이 수집되었습니다.</div>", unsafe_allow_html=True)
         for idx, item in enumerate(news_items):
-            card_html = f"""<div class="news-card">
-<span style="font-weight: 700; font-size: 1.05rem; display: block; margin-bottom: 8px;">{idx+1}. {item['title']}</span>
-<div style="text-align: right;">
-<a href="{item['url']}" target="_blank" style="
-font-size: 0.85rem;
-color: #2563eb !important;
-text-decoration: none;
-font-weight: 600;
-">기사 읽기 ↗</a>
+            card_html = f"""<div class="news-card" style="margin-bottom: 16px;">
+<div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px; flex-wrap: wrap; gap: 8px;">
+    <div style="display: flex; align-items: center; gap: 8px;">
+        <span style="background-color: {item['color']}; color: white; font-size: 0.75rem; font-weight: 700; padding: 3px 8px; border-radius: 6px;">{item['team']}</span>
+        <span style="background: rgba(100, 116, 139, 0.1); color: #475569; font-size: 0.75rem; font-weight: 600; padding: 3px 8px; border-radius: 6px;">{item.get('category', '📰 일반')}</span>
+    </div>
+    <span style="font-size: 0.75rem; background: rgba(59, 130, 246, 0.1); color: #2563eb; padding: 3px 8px; border-radius: 6px; white-space: nowrap;">{item['time']}</span>
+</div>
+<div class="news-title" style="font-weight: 700; font-size: 1.05rem; line-height: 1.45; margin-bottom: 10px;">
+    {idx+1}. {item['title']}
+</div>
+<div style="font-size: 0.9rem; color: #334155; background: rgba(245, 158, 11, 0.08); padding: 12px; border-radius: 8px; border-left: 4px solid #f59e0b; margin-bottom: 10px; line-height: 1.55;">
+    <strong>📝 기사 요약:</strong> {item['summary']}
+</div>
+<div style="display: flex; justify-content: space-between; align-items: center;">
+    <span style="font-size: 0.8rem; color: #94a3b8;">출처: {item['media']}</span>
+    <a href="{item['url']}" target="_blank" style="font-size: 0.85rem; color: #2563eb !important; text-decoration: none; font-weight: 600;">원문 기사 보기 ↗</a>
 </div>
 </div>"""
             st.markdown(textwrap.dedent(card_html), unsafe_allow_html=True)
