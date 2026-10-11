@@ -221,17 +221,35 @@ def fetch_league_standings():
         def parse_table(table):
             rows = table.find_all('tr')
             teams = []
+            first_wins = None
+            first_losses = None
+            
             for r in rows:
                 tds = r.find_all('td')
                 if len(tds) >= 8:
-                    rank = tds[0].text.strip()
+                    rank_raw = tds[0].text.strip()
+                    rank = "1위" if rank_raw in ["優勝", "1"] else f"{rank_raw}위"
                     name = tds[1].find('a').text.strip() if tds[1].find('a') else tds[1].text.strip()
                     games = tds[2].text.strip()
                     wins = tds[3].text.strip()
                     losses = tds[4].text.strip()
                     draws = tds[5].text.strip()
                     pct = tds[6].text.strip()
-                    diff = tds[7].text.strip()
+                    raw_diff = tds[7].text.strip() # 야후 재팬 원본: 바로 앞 팀과의 승차
+                    
+                    # 1위 팀 기준 공식 게임차 계산: ((1위승 - 팀승) + (팀패 - 1위패)) / 2.0
+                    try:
+                        w_val = int(wins)
+                        l_val = int(losses)
+                        if first_wins is None:
+                            first_wins = w_val
+                            first_losses = l_val
+                            calc_diff_str = "-"
+                        else:
+                            diff_val = ((first_wins - w_val) + (l_val - first_losses)) / 2.0
+                            calc_diff_str = f"{diff_val:.1f}" if diff_val % 1 != 0 else f"{int(diff_val):.1f}"
+                    except Exception:
+                        calc_diff_str = raw_diff
                     
                     teams.append({
                         '순위': rank,
@@ -241,7 +259,8 @@ def fetch_league_standings():
                         '패': losses,
                         '무': draws,
                         '승률': pct,
-                        '게임차': diff
+                        '게임차 (1위 기준)': calc_diff_str,
+                        '앞 팀 차': raw_diff
                     })
             return teams
             
@@ -2519,6 +2538,8 @@ with tab5:
             st.markdown("### 🔵 퍼시픽 리그 순위")
             df_pacific = pd.DataFrame(pacific_teams)
             st.dataframe(df_pacific, use_container_width=True, hide_index=True)
+            
+        st.caption("💡 **게임차 안내**: 일본 야후 스포츠 원본은 '바로 앞 팀과의 게임차'를 표시하지만, 본 대시보드에서는 한국 및 글로벌 야구 표준인 **'1위 팀 기준 승차(누적)'**로 자동 환산하여 일관되게 제공합니다. ('앞 팀 차' 열에서 원본 차이도 확인 가능)")
 
 # --- [여섯 번째 탭] 주요 야구 뉴스 ---
 with tab6:
