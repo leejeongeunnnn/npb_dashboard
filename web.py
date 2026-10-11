@@ -485,6 +485,28 @@ html, body, [data-testid="stAppViewContainer"], [data-testid="stHeader"] {
     border: 1px solid rgba(59, 130, 246, 0.25);
 }
 
+.badge-series {
+    background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
+    color: #b45309;
+    font-size: 0.72rem;
+    font-weight: 700;
+    padding: 3px 9px;
+    border-radius: 12px;
+    border: 1px solid #fcd34d;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.bracket-card {
+    background: #ffffff;
+    border: 1px solid #e2e8f0;
+    border-radius: 14px;
+    padding: 16px;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.04);
+    margin-bottom: 12px;
+}
+
 .match-teams-container {
     display: flex;
     flex-direction: column;
@@ -696,6 +718,28 @@ h1, h2, h3, h4, h5, h6, p, label, li, span {
     border: 1px solid rgba(59, 130, 246, 0.4);
 }
 
+.badge-series {
+    background: linear-gradient(135deg, #78350f 0%, #451a03 100%) !important;
+    color: #fde68a !important;
+    font-size: 0.72rem;
+    font-weight: 700;
+    padding: 3px 9px;
+    border-radius: 12px;
+    border: 1px solid #b45309 !important;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.bracket-card {
+    background: #1e293b !important;
+    border: 1px solid #334155 !important;
+    border-radius: 14px;
+    padding: 16px;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.2);
+    margin-bottom: 12px;
+}
+
 .match-teams-container {
     display: flex;
     flex-direction: column;
@@ -821,8 +865,8 @@ st.title("⚾ 일본 프로야구 대시보드")
 selected_date = st.date_input("📅 조회할 날짜를 선택하세요", datetime.date.today())
 date_str = selected_date.strftime("%Y-%m-%d")
 
-# ★ 2. 화면을 6개의 탭(메뉴)으로 깔끔하게 나누기
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["⚙️ 팀 설정", "🔥 경기 결과", "🏃‍♂️ 선수 상세 기록", "🏟️ 구장 및 공식 사이트", "🏆 리그 순위표", "📰 주요 야구 뉴스"])
+# ★ 2. 화면을 7개의 탭(메뉴)으로 깔끔하게 나누기
+tab1, tab2, tab_ps, tab3, tab4, tab5, tab6 = st.tabs(["⚙️ 팀 설정", "🔥 경기 결과", "🍁 포스트시즌 (CS & 일본시리즈)", "🏃‍♂️ 선수 상세 기록", "🏟️ 구장 및 공식 사이트", "🏆 리그 순위표", "📰 주요 야구 뉴스"])
 
 # --- [첫 번째 탭] 팀 설정 ---
 with tab1:
@@ -981,7 +1025,6 @@ def fetch_qualified_batters():
 
 # --- 크롤링 함수 (날짜별 스케줄 및 결과 조회) ---
 def fetch_games_by_date(date_str):
-
     url = "https://baseball.yahoo.co.jp/npb/schedule/"
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
@@ -1020,6 +1063,20 @@ def fetch_games_by_date(date_str):
             detail_link = ""
             if a_el and 'href' in a_el.attrs:
                 detail_link = "https://baseball.yahoo.co.jp" + a_el['href']
+                
+            # 포스트시즌 / 클라이맥스 시리즈 / 일본시리즈 여부 확인
+            sec = item.find_parent('section')
+            title_el = sec.find(class_='bb-score__title') if sec else None
+            series_raw = title_el.text.strip() if title_el else ""
+            series_name = ""
+            if "ファーストステージ" in series_raw:
+                series_name = "🍁 CS 퍼스트 스테이지"
+            elif "ファイナルステージ" in series_raw:
+                series_name = "🔥 CS 파이널 스테이지"
+            elif "クライマックス" in series_raw or "CS" in series_raw:
+                series_name = "🍁 클라이맥스 시리즈"
+            elif "日本シリーズ" in series_raw:
+                series_name = "🏆 SMBC 일본시리즈"
             
             games.append({
                 'home': home_team,
@@ -1029,12 +1086,424 @@ def fetch_games_by_date(date_str):
                 'status': status_text,
                 'link_text': link_text,
                 'venue': desc_text,
-                'detail_url': detail_link
+                'detail_url': detail_link,
+                'series': series_name
             })
         return games
     except Exception as e:
         st.error(f"데이터 로딩 실패: {e}")
         return []
+
+# --- 포스트시즌 실시간 경기 크롤링 함수 ---
+def fetch_postseason_live_games():
+    url = "https://baseball.yahoo.co.jp/npb/schedule/?kind=postseason"
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+    }
+    try:
+        response = requests.get(url, headers=headers)
+        response.encoding = 'utf-8'
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        postseason_games = []
+        for sec in soup.find_all('section', class_='bb-score'):
+            t_el = sec.find(class_='bb-score__title')
+            title_raw = t_el.text.strip() if t_el else ""
+            
+            # 한국어 라벨로 매핑
+            if "セ・ファースト" in title_raw:
+                stage_label = "🍁 센트럴 리그 CS 퍼스트"
+            elif "パ・ファースト" in title_raw:
+                stage_label = "🍁 퍼시픽 리그 CS 퍼스트"
+            elif "セ・ファイナル" in title_raw:
+                stage_label = "🔥 센트럴 리그 CS 파이널"
+            elif "パ・ファイナル" in title_raw:
+                stage_label = "🔥 퍼시픽 리그 CS 파이널"
+            elif "日本シリーズ" in title_raw:
+                stage_label = "🏆 SMBC 일본시리즈"
+            else:
+                stage_label = title_raw if title_raw else "🍁 포스트시즌"
+                
+            for it in sec.find_all('li', class_='bb-score__item'):
+                home_el = it.find(class_=lambda x: x and 'homeLogo' in x)
+                away_el = it.find(class_=lambda x: x and 'awayLogo' in x)
+                sc_l = it.find('span', class_='bb-score__score--left')
+                sc_r = it.find('span', class_='bb-score__score--right')
+                st_el = it.find('p', class_='bb-score__link') or it.find(class_='bb-score__status')
+                desc = it.find('p', class_='bb-score__description')
+                a_tag = it.find('a', class_='bb-score__content')
+                
+                postseason_games.append({
+                    'stage': stage_label,
+                    'home': home_el.text.strip() if home_el else "미정",
+                    'away': away_el.text.strip() if away_el else "미정",
+                    'score_home': sc_l.text.strip() if sc_l else "",
+                    'score_away': sc_r.text.strip() if sc_r else "",
+                    'status': st_el.text.strip() if st_el else "경기 전",
+                    'venue': desc.text.strip() if desc else "구장 미정",
+                    'detail_url': ('https://baseball.yahoo.co.jp' + a_tag['href']) if a_tag and 'href' in a_tag.attrs else ""
+                })
+        return postseason_games
+    except Exception as e:
+        print(f"[ERROR] fetch_postseason_live_games failed: {e}")
+        return []
+
+# --- 포스트시즌 마스터 일정 데이터 (CS & 일본시리즈) ---
+POSTSEASON_MASTER_SCHEDULE = [
+    # CS 퍼스트 스테이지
+    {
+        "stage": "CS 퍼스트 스테이지",
+        "stage_code": "cs_first",
+        "league": "센트럴 리그",
+        "game_num": "1차전",
+        "date": "2026-10-10",
+        "date_display": "10월 10일 (토)",
+        "time": "14:00",
+        "home": "요미우리 자이언츠 (2위)",
+        "away": "요코하마 DeNA (3위)",
+        "venue": "도쿄 돔",
+        "rules": "3전 2선승제 (전 경기 2위 구장)",
+        "status": "경기 종료"
+    },
+    {
+        "stage": "CS 퍼스트 스테이지",
+        "stage_code": "cs_first",
+        "league": "퍼시픽 리그",
+        "game_num": "1차전",
+        "date": "2026-10-10",
+        "date_display": "10월 10일 (토)",
+        "time": "14:00",
+        "home": "세이부 라이온즈 (2위)",
+        "away": "니혼햄 파이터즈 (3위)",
+        "venue": "벨루나 돔",
+        "rules": "3전 2선승제 (전 경기 2위 구장)",
+        "status": "경기 종료"
+    },
+    {
+        "stage": "CS 퍼스트 스테이지",
+        "stage_code": "cs_first",
+        "league": "센트럴 리그",
+        "game_num": "2차전",
+        "date": "2026-10-11",
+        "date_display": "10월 11일 (일)",
+        "time": "14:00",
+        "home": "요미우리 자이언츠 (2위)",
+        "away": "요코하마 DeNA (3위)",
+        "venue": "도쿄 돔",
+        "rules": "3전 2선승제",
+        "status": "진행 중 / 종료"
+    },
+    {
+        "stage": "CS 퍼스트 스테이지",
+        "stage_code": "cs_first",
+        "league": "퍼시픽 리그",
+        "game_num": "2차전",
+        "date": "2026-10-11",
+        "date_display": "10월 11일 (일)",
+        "time": "14:00",
+        "home": "세이부 라이온즈 (2위)",
+        "away": "니혼햄 파이터즈 (3위)",
+        "venue": "벨루나 돔",
+        "rules": "3전 2선승제",
+        "status": "진행 중 / 종료"
+    },
+    {
+        "stage": "CS 퍼스트 스테이지",
+        "stage_code": "cs_first",
+        "league": "센트럴 리그",
+        "game_num": "3차전",
+        "date": "2026-10-12",
+        "date_display": "10월 12일 (월)",
+        "time": "14:00",
+        "home": "요미우리 자이언츠 (2위)",
+        "away": "요코하마 DeNA (3위)",
+        "venue": "도쿄 돔",
+        "rules": "동률 시 2위 진출 (1승 1패 시 진행)",
+        "status": "경기 예정 (필요시)"
+    },
+    {
+        "stage": "CS 퍼스트 스테이지",
+        "stage_code": "cs_first",
+        "league": "퍼시픽 리그",
+        "game_num": "3차전",
+        "date": "2026-10-12",
+        "date_display": "10월 12일 (월)",
+        "time": "14:00",
+        "home": "세이부 라이온즈 (2위)",
+        "away": "니혼햄 파이터즈 (3위)",
+        "venue": "벨루나 돔",
+        "rules": "동률 시 2위 진출 (1승 1패 시 진행)",
+        "status": "경기 예정 (필요시)"
+    },
+    # CS 파이널 스테이지
+    {
+        "stage": "CS 파이널 스테이지",
+        "stage_code": "cs_final",
+        "league": "센트럴 리그",
+        "game_num": "1차전",
+        "date": "2026-10-14",
+        "date_display": "10월 14일 (수)",
+        "time": "18:00",
+        "home": "한신 타이거스 (1위)",
+        "away": "CS 퍼스트 스테이지 승자",
+        "venue": "한신 고시엔 구장",
+        "rules": "6전 4선승제 (1위팀 1승 어드밴티지)",
+        "status": "경기 예정"
+    },
+    {
+        "stage": "CS 파이널 스테이지",
+        "stage_code": "cs_final",
+        "league": "퍼시픽 리그",
+        "game_num": "1차전",
+        "date": "2026-10-14",
+        "date_display": "10월 14일 (수)",
+        "time": "18:00",
+        "home": "소프트뱅크 호크스 (1위)",
+        "away": "CS 퍼스트 스테이지 승자",
+        "venue": "미즈호 PayPay 돔 후쿠오카",
+        "rules": "6전 4선승제 (1위팀 1승 어드밴티지)",
+        "status": "경기 예정"
+    },
+    {
+        "stage": "CS 파이널 스테이지",
+        "stage_code": "cs_final",
+        "league": "센트럴 리그",
+        "game_num": "2차전",
+        "date": "2026-10-15",
+        "date_display": "10월 15일 (목)",
+        "time": "18:00",
+        "home": "한신 타이거스 (1위)",
+        "away": "CS 퍼스트 스테이지 승자",
+        "venue": "한신 고시엔 구장",
+        "rules": "전 경기 1위 홈구장 개최",
+        "status": "경기 예정"
+    },
+    {
+        "stage": "CS 파이널 스테이지",
+        "stage_code": "cs_final",
+        "league": "퍼시픽 리그",
+        "game_num": "2차전",
+        "date": "2026-10-15",
+        "date_display": "10월 15일 (목)",
+        "time": "18:00",
+        "home": "소프트뱅크 호크스 (1위)",
+        "away": "CS 퍼스트 스테이지 승자",
+        "venue": "미즈호 PayPay 돔 후쿠오카",
+        "rules": "전 경기 1위 홈구장 개최",
+        "status": "경기 예정"
+    },
+    {
+        "stage": "CS 파이널 스테이지",
+        "stage_code": "cs_final",
+        "league": "센트럴 리그",
+        "game_num": "3차전",
+        "date": "2026-10-16",
+        "date_display": "10월 16일 (금)",
+        "time": "18:00",
+        "home": "한신 타이거스 (1위)",
+        "away": "CS 퍼스트 스테이지 승자",
+        "venue": "한신 고시엔 구장",
+        "rules": "전 경기 1위 홈구장 개최",
+        "status": "경기 예정"
+    },
+    {
+        "stage": "CS 파이널 스테이지",
+        "stage_code": "cs_final",
+        "league": "퍼시픽 리그",
+        "game_num": "3차전",
+        "date": "2026-10-16",
+        "date_display": "10월 16일 (금)",
+        "time": "18:00",
+        "home": "소프트뱅크 호크스 (1위)",
+        "away": "CS 퍼스트 스테이지 승자",
+        "venue": "미즈호 PayPay 돔 후쿠오카",
+        "rules": "전 경기 1위 홈구장 개최",
+        "status": "경기 예정"
+    },
+    {
+        "stage": "CS 파이널 스테이지",
+        "stage_code": "cs_final",
+        "league": "센트럴 리그",
+        "game_num": "4차전",
+        "date": "2026-10-17",
+        "date_display": "10월 17일 (토)",
+        "time": "14:00",
+        "home": "한신 타이거스 (1위)",
+        "away": "CS 퍼스트 스테이지 승자",
+        "venue": "한신 고시엔 구장",
+        "rules": "4승 선착 시 조기 종료",
+        "status": "경기 예정 (필요시)"
+    },
+    {
+        "stage": "CS 파이널 스테이지",
+        "stage_code": "cs_final",
+        "league": "퍼시픽 리그",
+        "game_num": "4차전",
+        "date": "2026-10-17",
+        "date_display": "10월 17일 (토)",
+        "time": "18:00",
+        "home": "소프트뱅크 호크스 (1위)",
+        "away": "CS 퍼스트 스테이지 승자",
+        "venue": "미즈호 PayPay 돔 후쿠오카",
+        "rules": "4승 선착 시 조기 종료",
+        "status": "경기 예정 (필요시)"
+    },
+    {
+        "stage": "CS 파이널 스테이지",
+        "stage_code": "cs_final",
+        "league": "센트럴 리그",
+        "game_num": "5차전",
+        "date": "2026-10-18",
+        "date_display": "10월 18일 (일)",
+        "time": "14:00",
+        "home": "한신 타이거스 (1위)",
+        "away": "CS 퍼스트 스테이지 승자",
+        "venue": "한신 고시엔 구장",
+        "rules": "4승 선착 시 조기 종료",
+        "status": "경기 예정 (필요시)"
+    },
+    {
+        "stage": "CS 파이널 스테이지",
+        "stage_code": "cs_final",
+        "league": "퍼시픽 리그",
+        "game_num": "5차전",
+        "date": "2026-10-18",
+        "date_display": "10월 18일 (일)",
+        "time": "14:00",
+        "home": "소프트뱅크 호크스 (1위)",
+        "away": "CS 퍼스트 스테이지 승자",
+        "venue": "미즈호 PayPay 돔 후쿠오카",
+        "rules": "4승 선착 시 조기 종료",
+        "status": "경기 예정 (필요시)"
+    },
+    {
+        "stage": "CS 파이널 스테이지",
+        "stage_code": "cs_final",
+        "league": "센트럴 리그",
+        "game_num": "6차전",
+        "date": "2026-10-19",
+        "date_display": "10월 19일 (월)",
+        "time": "18:00",
+        "home": "한신 타이거스 (1위)",
+        "away": "CS 퍼스트 스테이지 승자",
+        "venue": "한신 고시엔 구장",
+        "rules": "최종 6차전 (동률 시 1위 진출)",
+        "status": "경기 예정 (필요시)"
+    },
+    {
+        "stage": "CS 파이널 스테이지",
+        "stage_code": "cs_final",
+        "league": "퍼시픽 리그",
+        "game_num": "6차전",
+        "date": "2026-10-19",
+        "date_display": "10월 19일 (월)",
+        "time": "18:00",
+        "home": "소프트뱅크 호크스 (1위)",
+        "away": "CS 퍼스트 스테이지 승자",
+        "venue": "미즈호 PayPay 돔 후쿠오카",
+        "rules": "최종 6차전 (동률 시 1위 진출)",
+        "status": "경기 예정 (필요시)"
+    },
+    # SMBC 일본시리즈
+    {
+        "stage": "SMBC 일본시리즈",
+        "stage_code": "japan_series",
+        "league": "NPB 통합 챔피언십",
+        "game_num": "1차전",
+        "date": "2026-10-24",
+        "date_display": "10월 24일 (토)",
+        "time": "18:30",
+        "home": "센트럴 리그 우승팀",
+        "away": "퍼시픽 리그 우승팀",
+        "venue": "센트럴 홈구장",
+        "rules": "7전 4선승제 (1·2차전 센트럴 홈)",
+        "status": "경기 예정"
+    },
+    {
+        "stage": "SMBC 일본시리즈",
+        "stage_code": "japan_series",
+        "league": "NPB 통합 챔피언십",
+        "game_num": "2차전",
+        "date": "2026-10-25",
+        "date_display": "10월 25일 (일)",
+        "time": "18:30",
+        "home": "센트럴 리그 우승팀",
+        "away": "퍼시픽 리그 우승팀",
+        "venue": "센트럴 홈구장",
+        "rules": "7전 4선승제",
+        "status": "경기 예정"
+    },
+    {
+        "stage": "SMBC 일본시리즈",
+        "stage_code": "japan_series",
+        "league": "NPB 통합 챔피언십",
+        "game_num": "3차전",
+        "date": "2026-10-27",
+        "date_display": "10월 27일 (화)",
+        "time": "18:30",
+        "home": "퍼시픽 리그 우승팀",
+        "away": "센트럴 리그 우승팀",
+        "venue": "퍼시픽 홈구장",
+        "rules": "3·4·5차전 퍼시픽 홈 (10/26 이동일)",
+        "status": "경기 예정"
+    },
+    {
+        "stage": "SMBC 일본시리즈",
+        "stage_code": "japan_series",
+        "league": "NPB 통합 챔피언십",
+        "game_num": "4차전",
+        "date": "2026-10-28",
+        "date_display": "10월 28일 (수)",
+        "time": "18:30",
+        "home": "퍼시픽 리그 우승팀",
+        "away": "센트럴 리그 우승팀",
+        "venue": "퍼시픽 홈구장",
+        "rules": "7전 4선승제",
+        "status": "경기 예정"
+    },
+    {
+        "stage": "SMBC 일본시리즈",
+        "stage_code": "japan_series",
+        "league": "NPB 통합 챔피언십",
+        "game_num": "5차전",
+        "date": "2026-10-29",
+        "date_display": "10월 29일 (목)",
+        "time": "18:30",
+        "home": "퍼시픽 리그 우승팀",
+        "away": "센트럴 리그 우승팀",
+        "venue": "퍼시픽 홈구장",
+        "rules": "4승 선착 시 조기 종료",
+        "status": "경기 예정 (필요시)"
+    },
+    {
+        "stage": "SMBC 일본시리즈",
+        "stage_code": "japan_series",
+        "league": "NPB 통합 챔피언십",
+        "game_num": "6차전",
+        "date": "2026-10-31",
+        "date_display": "10월 31일 (토)",
+        "time": "18:30",
+        "home": "센트럴 리그 우승팀",
+        "away": "퍼시픽 리그 우승팀",
+        "venue": "센트럴 홈구장",
+        "rules": "6·7차전 센트럴 홈 (10/30 이동일)",
+        "status": "경기 예정 (필요시)"
+    },
+    {
+        "stage": "SMBC 일본시리즈",
+        "stage_code": "japan_series",
+        "league": "NPB 통합 챔피언십",
+        "game_num": "7차전",
+        "date": "2026-11-01",
+        "date_display": "11월 01일 (일)",
+        "time": "18:30",
+        "home": "센트럴 리그 우승팀",
+        "away": "퍼시픽 리그 우승팀",
+        "venue": "센트럴 홈구장",
+        "rules": "최종 7차전 챔피언 결정전",
+        "status": "경기 예정 (필요시)"
+    }
+]
 
 # --- 선수 상세 기록 크롤링 함수 ---
 def fetch_game_player_stats(stats_url, target_team_jp):
@@ -1202,11 +1671,15 @@ def render_game_card(game, is_fav=False):
             
     card_class = "match-card-fav" if is_fav else "match-card"
     
+    series_badge = ""
+    if game.get('series'):
+        series_badge = f'<span class="badge-series" style="margin-left: 6px;">{game["series"]}</span>'
+    
     # HTML 문자열에서 마크다운 파서 오작동(코드 블록 취급)을 방지하기 위해 
     # 내부에 들여쓰기가 전혀 들어가지 않도록 문자열을 작성하고 textwrap.dedent를 수행
     html_content = f"""<div class="{card_class}">
 <div class="match-header">
-<div class="match-venue">📍 {game['venue']}</div>
+<div class="match-venue">📍 {game['venue']} {series_badge}</div>
 <span class="match-status-badge {status_class}">{status_kr}</span>
 </div>
 <div class="match-teams-container">
@@ -1280,6 +1753,172 @@ with tab2:
                     col_idx = idx % 2
                     with cols[col_idx]:
                         render_game_card(game, is_fav=False)
+
+# --- [포스트시즌 탭] 🍁 클라이맥스 시리즈 & 일본시리즈 ---
+with tab_ps:
+    st.subheader("🍁 일본 프로야구 포스트시즌 (클라이맥스 시리즈 & 일본시리즈)")
+    st.markdown("가을야구의 꽃! 센트럴 리그 & 퍼시픽 리그의 **클라이맥스 시리즈(CS)** 및 최강자를 가리는 **SMBC 일본시리즈** 일정과 실시간 경기 결과를 한눈에 확인하세요.")
+
+    # 1. 포스트시즌 토너먼트 대진 브라켓 (Bracket)
+    st.markdown("### 🏆 2026 포스트시즌 토너먼트 대진표")
+    
+    col_bracket_c, col_bracket_vs, col_bracket_p = st.columns([5, 2, 5])
+    
+    with col_bracket_c:
+        st.markdown("""
+        <div class="bracket-card" style="border-left: 5px solid #ef4444;">
+            <div style="font-weight: 700; font-size: 1.05rem; color: #ef4444; margin-bottom: 8px;">🔴 센트럴 리그 (Central League)</div>
+            <div style="background: rgba(239, 68, 68, 0.06); padding: 10px; border-radius: 8px; margin-bottom: 8px;">
+                <div style="font-size: 0.8rem; color: #64748b;">[파이널 스테이지 직행 (1승 우대)]</div>
+                <div style="font-weight: 700; font-size: 1rem;">👑 한신 타이거스 (정규 1위)</div>
+            </div>
+            <div style="text-align: center; color: #94a3b8; font-size: 0.8rem; margin: 4px 0;">▲ 파이널 스테이지 대결</div>
+            <div style="background: rgba(0, 0, 0, 0.03); padding: 10px; border-radius: 8px;">
+                <div style="font-size: 0.8rem; color: #64748b;">[퍼스트 스테이지 3전 2선승제 (도쿄 돔)]</div>
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 4px;">
+                    <span style="font-weight: 600;">🥈 요미우리 자이언츠 (2위)</span>
+                    <span style="color: #64748b; font-weight: 700;">VS</span>
+                    <span style="font-weight: 600;">🥉 요코하마 DeNA (3위)</span>
+                </div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with col_bracket_vs:
+        st.markdown("""
+        <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; min-height: 150px; text-align: center;">
+            <div style="font-size: 2rem;">⚾</div>
+            <div style="font-weight: 800; font-size: 0.95rem; color: #b45309; margin-top: 4px;">SMBC<br>일본시리즈</div>
+            <div style="font-size: 0.75rem; color: #64748b; margin-top: 4px;">7전 4선승제</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with col_bracket_p:
+        st.markdown("""
+        <div class="bracket-card" style="border-left: 5px solid #3b82f6;">
+            <div style="font-weight: 700; font-size: 1.05rem; color: #3b82f6; margin-bottom: 8px;">🔵 퍼시픽 리그 (Pacific League)</div>
+            <div style="background: rgba(59, 130, 246, 0.06); padding: 10px; border-radius: 8px; margin-bottom: 8px;">
+                <div style="font-size: 0.8rem; color: #64748b;">[파이널 스테이지 직행 (1승 우대)]</div>
+                <div style="font-weight: 700; font-size: 1rem;">👑 소프트뱅크 호크스 (정규 1위)</div>
+            </div>
+            <div style="text-align: center; color: #94a3b8; font-size: 0.8rem; margin: 4px 0;">▲ 파이널 스테이지 대결</div>
+            <div style="background: rgba(0, 0, 0, 0.03); padding: 10px; border-radius: 8px;">
+                <div style="font-size: 0.8rem; color: #64748b;">[퍼스트 스테이지 3전 2선승제 (벨루나 돔)]</div>
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 4px;">
+                    <span style="font-weight: 600;">🥈 세이부 라이온즈 (2위)</span>
+                    <span style="color: #64748b; font-weight: 700;">VS</span>
+                    <span style="font-weight: 600;">🥉 니혼햄 파이터즈 (3위)</span>
+                </div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # 2. 실시간 포스트시즌 경기 현황 (라이브 스코어보드)
+    st.markdown("---")
+    st.markdown("### 🔴 오늘 진행 중인 포스트시즌 경기")
+    
+    col_btn_l, col_btn_r = st.columns([8, 2])
+    with col_btn_r:
+        if st.button("🔄 스코어 새로고침", use_container_width=True):
+            st.rerun()
+        
+    with st.spinner("야후 재팬에서 실시간 포스트시즌 경기 데이터를 조회하는 중..."):
+        ps_live_games = fetch_postseason_live_games()
+        
+    if not ps_live_games:
+        st.info("현재 실시간 진행 중이거나 오늘 예정된 포스트시즌 경기가 없습니다. 아래 전체 일정표를 확인하세요.")
+    else:
+        ps_cols = st.columns(min(len(ps_live_games), 2))
+        for idx, g in enumerate(ps_live_games):
+            col_target = ps_cols[idx % 2]
+            with col_target:
+                h_name = TEAM_INFO.get(g['home'], {}).get('kr', g['home'])
+                a_name = TEAM_INFO.get(g['away'], {}).get('kr', g['away'])
+                h_col = TEAM_INFO.get(g['home'], {}).get('color', '#3b82f6')
+                a_col = TEAM_INFO.get(g['away'], {}).get('color', '#ef4444')
+                
+                st_txt = g['status']
+                is_live = any(x in st_txt for x in ['回', '表', '裏', '進行'])
+                badge_bg = "rgba(239, 68, 68, 0.15)" if is_live else "#f1f5f9"
+                badge_color = "#ef4444" if is_live else "#475569"
+                
+                card_html = f"""<div class="match-card" style="border: 2px solid #f59e0b;">
+<div class="match-header">
+<div class="match-venue">📍 {g['venue']} <span class="badge-series">{g['stage']}</span></div>
+<span class="match-status-badge" style="background-color: {badge_bg}; color: {badge_color}; border: 1px solid {badge_color};">{st_txt}</span>
+</div>
+<div class="match-teams-container">
+<div class="team-row">
+<div class="team-info">
+<div class="team-color-indicator" style="background-color: {h_col};"></div>
+<span class="team-name-kr">{h_name}</span>
+<span class="team-name-jp">{g['home']}</span>
+</div>
+<span class="team-score-val" style="font-size: 1.6rem; font-weight: 800;">{g['score_home'] if g['score_home'] else '-'}</span>
+</div>
+<div class="team-row">
+<div class="team-info">
+<div class="team-color-indicator" style="background-color: {a_col};"></div>
+<span class="team-name-kr">{a_name}</span>
+<span class="team-name-jp">{g['away']}</span>
+</div>
+<span class="team-score-val" style="font-size: 1.6rem; font-weight: 800;">{g['score_away'] if g['score_away'] else '-'}</span>
+</div>
+</div>"""
+                if g['detail_url']:
+                    card_html += f"""<div style="margin-top: 15px; text-align: right; border-top: 1px solid rgba(255, 255, 255, 0.05); padding-top: 10px;">
+<a href="{g['detail_url']}" target="_blank" style="font-size: 0.85rem; color: #2563eb; text-decoration: none; font-weight: 700;">상세 경기 중계 및 라인업 보기 ↗</a>
+</div>"""
+                card_html += "</div>"
+                st.markdown(textwrap.dedent(card_html), unsafe_allow_html=True)
+
+    # 3. 전체 포스트시즌 일정표 (CS & 일본시리즈)
+    st.markdown("---")
+    st.markdown("### 📅 포스트시즌 전체 일정 및 타임라인")
+    
+    stage_filter = st.radio(
+        "조회할 시리즈를 선택하세요:",
+        ["📌 전체 일정", "🍁 CS 퍼스트 스테이지", "🔥 CS 파이널 스테이지", "🏆 SMBC 일본시리즈"],
+        horizontal=True
+    )
+    
+    if stage_filter == "🍁 CS 퍼스트 스테이지":
+        filtered_schedule = [s for s in POSTSEASON_MASTER_SCHEDULE if s['stage_code'] == 'cs_first']
+    elif stage_filter == "🔥 CS 파이널 스테이지":
+        filtered_schedule = [s for s in POSTSEASON_MASTER_SCHEDULE if s['stage_code'] == 'cs_final']
+    elif stage_filter == "🏆 SMBC 일본시리즈":
+        filtered_schedule = [s for s in POSTSEASON_MASTER_SCHEDULE if s['stage_code'] == 'japan_series']
+    else:
+        filtered_schedule = POSTSEASON_MASTER_SCHEDULE
+        
+    df_ps = pd.DataFrame([{
+        "시리즈": item["stage"],
+        "라운드": item["game_num"],
+        "날짜": item["date_display"],
+        "시간": item["time"],
+        "대진 (홈 vs 원정)": f"{item['home']} vs {item['away']}",
+        "구장": item["venue"],
+        "규정 / 비고": item["rules"],
+        "상태": item["status"]
+    } for item in filtered_schedule])
+    
+    st.dataframe(df_ps, use_container_width=True, hide_index=True)
+    
+    # 4. 시리즈 진행 방식 및 룰 가이드
+    with st.expander("📖 클라이맥스 시리즈 & 일본시리즈 진행 규정 안내"):
+        st.markdown("""
+        * **🍁 CS 퍼스트 스테이지 (3전 2선승제)**:
+            - 센트럴 & 퍼시픽 2위 팀 홈구장에서 전 경기 진행 (3연전)
+            - 1승 1패 1무 등 동률일 경우 **정규시즌 2위 팀이 파이널 스테이지로 진출**합니다.
+        * **🔥 CS 파이널 스테이지 (6전 4선승제)**:
+            - 센트럴 & 퍼시픽 1위 팀 홈구장에서 전 경기 진행 (6연전)
+            - **정규시즌 1위 팀에게 1승 어드밴티지**가 주어집니다 (실제로는 먼저 3승을 거두면 진출).
+            - 무승부로 인해 동률로 시리즈가 끝나도 **정규시즌 1위 팀이 진출**합니다.
+        * **🏆 SMBC 일본시리즈 (7전 4선승제)**:
+            - 센트럴 리그 챔피언 vs 퍼시픽 리그 챔피언 맞대결
+            - 1·2차전과 6·7차전은 짝수 해 센트럴 리그 홈구장, 홀수 해 퍼시픽 리그 홈구장에서 개최됩니다.
+            - 7차전까지 무승부 등으로 승부가 결정되지 않으면 8차전 연장전이 진행됩니다.
+        """)
 
 # --- [세 번째 탭] 선수 상세 기록 ---
 with tab3:
